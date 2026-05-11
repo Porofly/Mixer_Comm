@@ -27,7 +27,16 @@ ament_target_dependencies(mixer_serial_node
   mixer_comm_msgs
 )
 
-install(TARGETS mixer_serial_node
+add_executable(mixer_demo_pub src/mixer_demo_pub.cpp)
+ament_target_dependencies(mixer_demo_pub rclcpp mixer_comm_msgs)
+
+add_executable(mixer_demo_sub src/mixer_demo_sub.cpp)
+ament_target_dependencies(mixer_demo_sub rclcpp mixer_comm_msgs)
+
+install(TARGETS
+  mixer_serial_node
+  mixer_demo_pub
+  mixer_demo_sub
   DESTINATION lib/${PROJECT_NAME}
 )
 
