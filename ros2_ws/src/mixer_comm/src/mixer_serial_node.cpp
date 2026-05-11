@@ -135,8 +135,6 @@ private:
     const std::size_t total = encode_frame(
       kTypeTxPayload, msg.slot, payload, kMxPayloadSize, frame, sizeof(frame));
 
-    RCLCPP_INFO(get_logger(), "on_tx: slot=%u, first byte=0x%02x, frame_bytes=%zu",
-                msg.slot, payload[0], total);
     try {
       port_.write_all(frame, total);
     } catch (const std::exception & e) {
