@@ -31,7 +31,7 @@ install(TARGETS mixer_serial_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch
+install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
   OPTIONAL
 )

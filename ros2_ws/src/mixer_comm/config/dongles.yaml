@@ -1,0 +1,15 @@
+# Mapping from Mixer physical node ID to the dongle's USB serial number.
+#
+# Find the serial of a connected dongle with:
+#   ls /dev/serial/by-id/
+#   # -> usb-NES_Lab___Mixer_Mixer_Console__PCA10059__<SERIAL>-if00
+#
+# The bridge launch file converts each entry into a mixer_serial_node spawned
+# under namespace `/mixer/node<id>` pointing at the matching by-id path. Adding
+# a new dongle = one more list entry; nothing else changes.
+
+dongles:
+  - node_id: 1
+    serial: "297729DAE31AEE29"
+  - node_id: 2
+    serial: "5B36F76056801B1F"
