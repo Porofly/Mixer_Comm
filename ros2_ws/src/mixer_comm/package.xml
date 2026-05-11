@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mixer_comm</name>
+  <version>0.0.1</version>
+  <description>ROS2 bridge for the Mixer protocol running on an nRF52840 USB dongle. Reads the dongle's serial console and publishes parsed round statistics.</description>
+  <maintainer email="yeogyeom1@gmail.com">YG_Kim</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>mixer_comm_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
