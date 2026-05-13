@@ -46,7 +46,9 @@ Usage:
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -81,46 +83,61 @@ def _spawn(context, *_args, **_kwargs):
         )
 
     ns = f"/mixer/node{node_id}"
+    serial_node = Node(
+        package="mixer_comm",
+        executable="mixer_serial_node",
+        namespace=ns,
+        name="mixer_serial_node",
+        output="screen",
+        parameters=[
+            {"device": device},
+            {"baud": baud},
+            {"frame_id": f"mixer_node{node_id}"},
+        ],
+    )
+    pub_node = Node(
+        package="mixer_comm",
+        executable="mixer_demo_pub",
+        namespace=ns,
+        name="mixer_demo_pub",
+        output="screen",
+        parameters=[
+            {"node_id": node_id},
+            {"slot": slot},
+            {"rate_hz": pub_rate_hz},
+            {"tx_count": count},
+        ],
+    )
+    sub_node = Node(
+        package="mixer_comm",
+        executable="mixer_demo_sub",
+        namespace=ns,
+        name="mixer_demo_sub",
+        output="screen",
+        parameters=[
+            {"node_id": node_id},
+            {"report_period_s": report_period_s},
+            {"expected_rx_count": count},
+            {"drain_grace_s": drain_grace_s},
+            {"timeout_s": timeout_s},
+            {"report_path": report_path},
+        ],
+    )
+    # In a bounded run the sub finalizes (final report + JSON + shutdown) once
+    # it has seen `count` frames. Without this handler the launch would keep
+    # the other two processes alive afterwards. With it, sub exiting tears
+    # down the whole launch -- so a 100-frame test really exits when done.
+    # In unbounded mode (count == 0) the sub never exits on its own, so this
+    # is a no-op there.
     return [
-        Node(
-            package="mixer_comm",
-            executable="mixer_serial_node",
-            namespace=ns,
-            name="mixer_serial_node",
-            output="screen",
-            parameters=[
-                {"device": device},
-                {"baud": baud},
-                {"frame_id": f"mixer_node{node_id}"},
-            ],
-        ),
-        Node(
-            package="mixer_comm",
-            executable="mixer_demo_pub",
-            namespace=ns,
-            name="mixer_demo_pub",
-            output="screen",
-            parameters=[
-                {"node_id": node_id},
-                {"slot": slot},
-                {"rate_hz": pub_rate_hz},
-                {"tx_count": count},
-            ],
-        ),
-        Node(
-            package="mixer_comm",
-            executable="mixer_demo_sub",
-            namespace=ns,
-            name="mixer_demo_sub",
-            output="screen",
-            parameters=[
-                {"node_id": node_id},
-                {"report_period_s": report_period_s},
-                {"expected_rx_count": count},
-                {"drain_grace_s": drain_grace_s},
-                {"timeout_s": timeout_s},
-                {"report_path": report_path},
-            ],
+        serial_node,
+        pub_node,
+        sub_node,
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=sub_node,
+                on_exit=[EmitEvent(event=Shutdown(reason="demo_sub finalized"))],
+            )
         ),
     ]
 

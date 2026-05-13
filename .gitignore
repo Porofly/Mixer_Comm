@@ -1,4 +1,6 @@
 CLAUDE.md
+reports/
+__pycache__/
 
 # colcon build artifacts
 ros2_ws/build/
