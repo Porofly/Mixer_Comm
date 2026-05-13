@@ -11,6 +11,8 @@ running on nRF52840 USB dongles (PCA10059). The repository contains:
   - `mixer_comm_msgs` — message definitions (`MixerStats`, `MixerPayload`).
   - `mixer_comm` — `mixer_serial_node` and a launch file that brings up one
     node per dongle, mapping `node_id` ↔ USB serial via `dongles.yaml`.
+- `docker/` — container image and a per-host helper script for running the
+  bridge on Jetson-class hosts.
 
 End state: each dongle becomes a ROS 2 namespace, and arbitrary 16-byte
 payloads can be exchanged between dongles over Mixer rounds via plain
@@ -24,6 +26,11 @@ ROS 2 topics.
 +-------------+   /mixer/nodeN/mixer/stats     +-----------+
                   /mixer/nodeN/mixer/log
 ```
+
+> Looking for the bidirectional verification suite (RTT echo, lost/dup
+> accounting, JSON reports, hello-world ASCII demo)? Switch to the
+> [`demo` branch](https://github.com/Porofly/Mixer_Comm/tree/demo). It
+> sits on top of the bridge documented here.
 
 ---
 
@@ -70,7 +77,7 @@ optional flags (the original is restored on exit, so the working tree stays
 clean):
 
 ```bash
-# Halve the round length -> roughly double the host publish rate ceiling
+# Halve the round length
 scripts/build_node.sh 1 --round-length 25
 scripts/build_node.sh 2 --round-length 25
 
@@ -81,22 +88,26 @@ scripts/build_node.sh 2 --round-length 25 --slot-us 1500
 
 Both nodes must be flashed with identical values or they will not synchronise.
 
-The actual round period is `round_length × slot_us` plus PHY/processing
-overhead, not the bare product. Measured on this build:
+The actual round period is **not** simply `round_length × slot_us` — most of
+the time is fixed per-round overhead (coding, dongle↔host I/O, smart
+shutdown), so rate gains are smaller than the slot product would suggest.
+Measured on this build:
 
-| `round_length` | `slot_us` | Measured round period | Host rate ceiling |
-|----------------|-----------|-----------------------|-------------------|
+| `round_length` | `slot_us` | Measured round period | Round rate |
+|----------------|-----------|-----------------------|------------|
 | 50  (default)  | 2000      | ~1.10 s               | ~0.91 Hz |
+| 25             | 2000      | ~1.06 s               | ~0.95 Hz |
+| 50             | 1500      | ~1.08 s               | ~0.93 Hz |
+| 16             | 1500      | ~1.03 s               | ~0.97 Hz |
 
-Verify your build's actual round rate empirically with the bridge running:
+Verify your build's actual rate empirically with the bridge running:
 
 ```bash
 ros2 topic hz /mixer/node<id>/mixer/stats
 ```
 
-Set `pub_rate_hz` (in `mixer_demo_single.launch.py` args) at or below the
-measured round rate -- publishing faster than the round just back-pressures
-the dongle TX queue and looks like packet loss in the demo's `lost` counter.
+The host should publish to `mixer/tx` slower than this rate; otherwise the
+extra frames pile up in the dongle's per-round TX queue and look like loss.
 
 ### Host (ROS 2 workspace)
 
@@ -204,83 +215,57 @@ the size field looks implausible (`< 2` or `> kMaxFrameSize`).
 
 ---
 
-## Two-Jetson verification (Docker)
+## Docker
 
-For verifying RF link health between two Jetson Orin Nano boards (or any two
-hosts), one dongle per board, use the Docker image. Each board runs an
-independent container with its own dongle; ROS 2 DDS is intentionally
-local-only on each board, so all peer traffic is carried by the Mixer RF
-link itself.
+A container image is provided for running the bridge on Jetson-class hosts
+without installing ROS 2 directly. Image base is `ros:jazzy-ros-base`
+(multi-arch, including arm64). The Dockerfile copies only `ros2_ws/` —
+firmware build artifacts and the `Mixer/` submodule are excluded by
+`.dockerignore` so the image stays small.
 
-The `mixer_demo_single.launch.py` launch file brings up `mixer_serial_node`
-+ `mixer_demo_pub` + `mixer_demo_sub` for one dongle. The demo pub emits 1 Hz
-synthetic 16-byte frames; when it sees a peer's frame on its own `mixer/rx`,
-it echoes it back in its next outgoing frame. The original sender then
-recognises the bounce-back and computes per-peer **RTT** -- this works
-without any inter-host clock synchronisation because each node measures RTT
-against its own `steady_clock`. The demo sub additionally reports per-peer
-sequence loss, duplicates, and reordering.
-
-### Build the image (once, on each Jetson)
+### Build
 
 ```bash
-git clone --recursive <repo>
-cd Mixer_Comm
 docker build -f docker/Dockerfile -t mixer_comm:latest .
 ```
 
-The `Mixer/` submodule is excluded from the Docker context (see
-`.dockerignore`); flash the dongles from a development PC before plugging
-them into the Jetsons.
-
-### Run (one command per Jetson)
+On a Jetson Orin Nano (JetPack 6.x RT kernel) the Docker bridge driver
+needs the `iptable_raw` kernel module, which is not present. Build with
+host networking to side-step bridge creation:
 
 ```bash
-# Jetson A, dongle flashed as node 1
-./docker/run_jetson.sh 1 297729DAE31AEE29
-
-# Jetson B, dongle flashed as node 2
-./docker/run_jetson.sh 2 5B36F76056801B1F
+docker build --network=host -f docker/Dockerfile -t mixer_comm:latest .
 ```
 
-Or via compose:
+### Run
+
+`docker/run_jetson.sh` is the per-host helper: it resolves the dongle's
+by-id symlink, mounts the resulting `/dev/ttyACM*` into the container, and
+launches a single `mixer_serial_node` for that dongle.
 
 ```bash
-MIXER_NODE_ID=1 MIXER_SERIAL=297729DAE31AEE29 \
-    docker compose -f docker/docker-compose.yml up
+./docker/run_jetson.sh <node_id> <usb_serial>
 ```
 
-### Expected output
+Environment variables:
 
-After both containers are up, each side's `mixer_demo_sub` prints lines like:
+| Variable | Meaning |
+|----------|---------|
+| `MIXER_HOST_NET=1` | Use `--network=host` (Jetson L4T workaround for the same `iptable_raw` issue). Safe with `ROS_LOCALHOST_ONLY=1` baked into the image. |
+| `MIXER_IMAGE`, `MIXER_NAME` | Image tag and container name overrides. |
 
-```
-peer=2 rx=42 lost=0 dup=0 reord=0 rtt[n=41 min/mean/max us]=4123/4350/5891
-```
+Trailing positional arguments after the serial are passed straight to
+`ros2 launch`.
 
-- `rx` increasing on both sides → bidirectional RF link OK.
-- `lost`/`dup` near 0 → link is healthy.
-- `rtt n=` non-zero → the peer is correctly echoing our frames back, so the
-  full round-trip path (host A → dongle A → RF → dongle B → host B → dongle B
-  → RF → dongle A → host A) is intact.
-
-`mixer_serial_node`'s `stats` topic also shows `rank=8 decoded=8` per round
-when the link is locked (verify with `ros2 topic echo /mixer/node1/mixer/stats`
-inside the container).
-
-### Scaling beyond two nodes
-
-The demo nodes are N:N-ready: each `mixer_demo_sub` splits incoming frames by
-`sender_id` and tracks per-peer counters, so adding a third Jetson means
-flashing a third dongle and running `./docker/run_jetson.sh 3 <serial>` on it.
-On the firmware side, update `nodes[]` and `payload_distribution[]` per the
-section below and re-flash all dongles.
+The bare bridge launched by this script just exposes the four topics in
+the catalogue above; for end-to-end verification, see the
+[`demo` branch](https://github.com/Porofly/Mixer_Comm/tree/demo).
 
 ---
 
 ## Extending to more nodes
 
-The two-dongle setup verified above generalises by editing two files:
+The two-dongle baseline generalises by editing two files:
 
 1. **Firmware** — [`Mixer/tutorial/nRF52840/mixer_config.h`](Mixer/tutorial/nRF52840/mixer_config.h):
 
@@ -318,6 +303,11 @@ This firmware fills empty TX slots with a zero payload on purpose (with
 ```
 .
 ├── CLAUDE.md                 # working-agreement notes for AI-assisted edits
+├── docker/
+│   ├── Dockerfile            # ros:jazzy-ros-base + ros2_ws colcon build
+│   ├── entrypoint.sh
+│   ├── run_jetson.sh         # one-dongle bring-up helper
+│   └── docker-compose.yml
 ├── Mixer/                    # submodule (Porofly/Mixer fork)
 │   ├── src/
 │   ├── tutorial/nRF52840/    # PCA10059 tutorial + binary-protocol firmware
