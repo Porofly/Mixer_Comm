@@ -1,0 +1,33 @@
+# Per-Jetson compose file. Each Jetson runs this file with its own values
+# for MIXER_NODE_ID and MIXER_SERIAL (set via .env or shell environment).
+#
+# Bring up:
+#   MIXER_NODE_ID=1 MIXER_SERIAL=297729DAE31AEE29 docker compose -f docker/docker-compose.yml up
+#
+# Or put them in docker/.env:
+#   MIXER_NODE_ID=1
+#   MIXER_SERIAL=297729DAE31AEE29
+#
+# DDS is intentionally local-only (set in the image). Override
+# ROS_LOCALHOST_ONLY=0 below if you want the two Jetsons to share a domain.
+
+services:
+  mixer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mixer_comm:latest
+    container_name: mixer-node${MIXER_NODE_ID}
+    restart: unless-stopped
+    volumes:
+      - /dev/serial:/dev/serial
+      - /dev/bus/usb:/dev/bus/usb
+    device_cgroup_rules:
+      - 'c 166:* rmw'   # /dev/ttyACM*
+      - 'c 188:* rmw'   # /dev/ttyUSB*
+    environment:
+      - ROS_LOCALHOST_ONLY=1
+    command: >
+      ros2 launch mixer_comm mixer_demo_single.launch.py
+        node_id:=${MIXER_NODE_ID}
+        serial:=${MIXER_SERIAL}

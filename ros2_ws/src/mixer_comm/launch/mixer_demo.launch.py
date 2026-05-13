@@ -2,16 +2,17 @@
 
 For every dongle listed in dongles.yaml this launch file spawns:
 - mixer_demo_pub under /mixer/node<id>, publishing 1 Hz to /mixer/node<id>/mixer/tx
-- mixer_demo_sub under /mixer/node<id>, listening to *every other* node's
-  /mixer/node<other>/mixer/rx topic so each sub reports what its dongle sees
-  of the other dongles' traffic.
+- mixer_demo_sub under /mixer/node<id>, listening to /mixer/node<id>/mixer/rx
+  (its own dongle decodes every peer's slot, so one subscription sees them all)
 
 The publisher's slot defaults to (node_id - 1) which matches the cyclic
 payload_distribution used by the firmware (slot 0 -> node 1, slot 1 -> node 2,
-...). Override via `pub_slot_offset`/`pub_rate_hz`/`report_period_s` launch args.
+...). Override via `pub_rate_hz` / `report_period_s` launch args.
 
-Usage:
+Usage (single-host, both dongles plugged into the same machine):
     ros2 launch mixer_comm mixer_demo.launch.py
+
+For the multi-host (per-Jetson) case, use mixer_demo_single.launch.py instead.
 """
 
 from pathlib import Path
@@ -36,10 +37,10 @@ def _spawn_demos(context, *_args, **_kwargs):
     if not entries:
         raise ValueError(f"{config_path}: no dongles to demo")
 
-    node_ids = [int(e["node_id"]) for e in entries]
     actions = []
-    for nid in node_ids:
-        slot = nid - 1  # matches cyclic payload_distribution slot 0->1, 1->2, ...
+    for e in entries:
+        nid = int(e["node_id"])
+        slot = nid - 1  # matches cyclic payload_distribution
         actions.append(
             Node(
                 package="mixer_comm",
@@ -54,12 +55,6 @@ def _spawn_demos(context, *_args, **_kwargs):
                 ],
             )
         )
-        # Each demo_sub listens to every other dongle's RX topic. Listening to
-        # its own RX too would also work (each dongle decodes its own slot) but
-        # would clutter the report with self-loops.
-        peer_topics = [
-            f"/mixer/node{other}/mixer/rx" for other in node_ids if other != nid
-        ]
         actions.append(
             Node(
                 package="mixer_comm",
@@ -68,7 +63,7 @@ def _spawn_demos(context, *_args, **_kwargs):
                 name="mixer_demo_sub",
                 output="screen",
                 parameters=[
-                    {"listen_topics": peer_topics},
+                    {"node_id": nid},
                     {"report_period_s": report_period_s},
                 ],
             )

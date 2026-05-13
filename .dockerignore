@@ -1,0 +1,9 @@
+Mixer/
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+.git/
+**/__pycache__/
+*.pyc
+README*.md
+CLAUDE.md

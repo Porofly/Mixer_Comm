@@ -169,6 +169,80 @@ the size field looks implausible (`< 2` or `> kMaxFrameSize`).
 
 ---
 
+## Two-Jetson verification (Docker)
+
+For verifying RF link health between two Jetson Orin Nano boards (or any two
+hosts), one dongle per board, use the Docker image. Each board runs an
+independent container with its own dongle; ROS 2 DDS is intentionally
+local-only on each board, so all peer traffic is carried by the Mixer RF
+link itself.
+
+The `mixer_demo_single.launch.py` launch file brings up `mixer_serial_node`
++ `mixer_demo_pub` + `mixer_demo_sub` for one dongle. The demo pub emits 1 Hz
+synthetic 16-byte frames; when it sees a peer's frame on its own `mixer/rx`,
+it echoes it back in its next outgoing frame. The original sender then
+recognises the bounce-back and computes per-peer **RTT** -- this works
+without any inter-host clock synchronisation because each node measures RTT
+against its own `steady_clock`. The demo sub additionally reports per-peer
+sequence loss, duplicates, and reordering.
+
+### Build the image (once, on each Jetson)
+
+```bash
+git clone --recursive <repo>
+cd Mixer_Comm
+docker build -f docker/Dockerfile -t mixer_comm:latest .
+```
+
+The `Mixer/` submodule is excluded from the Docker context (see
+`.dockerignore`); flash the dongles from a development PC before plugging
+them into the Jetsons.
+
+### Run (one command per Jetson)
+
+```bash
+# Jetson A, dongle flashed as node 1
+./docker/run_jetson.sh 1 297729DAE31AEE29
+
+# Jetson B, dongle flashed as node 2
+./docker/run_jetson.sh 2 5B36F76056801B1F
+```
+
+Or via compose:
+
+```bash
+MIXER_NODE_ID=1 MIXER_SERIAL=297729DAE31AEE29 \
+    docker compose -f docker/docker-compose.yml up
+```
+
+### Expected output
+
+After both containers are up, each side's `mixer_demo_sub` prints lines like:
+
+```
+peer=2 rx=42 lost=0 dup=0 reord=0 rtt[n=41 min/mean/max us]=4123/4350/5891
+```
+
+- `rx` increasing on both sides → bidirectional RF link OK.
+- `lost`/`dup` near 0 → link is healthy.
+- `rtt n=` non-zero → the peer is correctly echoing our frames back, so the
+  full round-trip path (host A → dongle A → RF → dongle B → host B → dongle B
+  → RF → dongle A → host A) is intact.
+
+`mixer_serial_node`'s `stats` topic also shows `rank=8 decoded=8` per round
+when the link is locked (verify with `ros2 topic echo /mixer/node1/mixer/stats`
+inside the container).
+
+### Scaling beyond two nodes
+
+The demo nodes are N:N-ready: each `mixer_demo_sub` splits incoming frames by
+`sender_id` and tracks per-peer counters, so adding a third Jetson means
+flashing a third dongle and running `./docker/run_jetson.sh 3 <serial>` on it.
+On the firmware side, update `nodes[]` and `payload_distribution[]` per the
+section below and re-flash all dongles.
+
+---
+
 ## Extending to more nodes
 
 The two-dongle setup verified above generalises by editing two files:
