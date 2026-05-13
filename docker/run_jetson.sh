@@ -39,12 +39,22 @@ shift 2
 IMAGE=${MIXER_IMAGE:-mixer_comm:latest}
 NAME=${MIXER_NAME:-mixer-node${NODE_ID}}
 
-# Sanity check: the by-id symlink for this dongle exists on the host.
+# Sanity check: the by-id symlink for this dongle exists on the host, and
+# resolve it to the actual /dev/ttyACM* node so we can pass that node into
+# the container as a --device. Mounting /dev/serial alone keeps the by-id
+# symlink visible but the symlink target (/dev/ttyACM*) must also be exposed
+# explicitly; --device-cgroup-rule grants permission but does not create the
+# device node inside the container.
 BY_ID="/dev/serial/by-id/usb-NES_Lab___Mixer_Mixer_Console__PCA10059__${SERIAL}-if00"
 if [[ ! -e "$BY_ID" ]]; then
     echo "ERROR: ${BY_ID} not found on host." >&2
     echo "  - Is the dongle plugged in?" >&2
     echo "  - Is its USB serial really ${SERIAL}? (ls /dev/serial/by-id/)" >&2
+    exit 1
+fi
+TTY_DEV=$(readlink -f "$BY_ID")
+if [[ ! -c "$TTY_DEV" ]]; then
+    echo "ERROR: by-id symlink resolved to '$TTY_DEV' which is not a char device." >&2
     exit 1
 fi
 
@@ -58,8 +68,7 @@ exec docker run --rm -it \
     "${NET_ARGS[@]}" \
     -v /dev/serial:/dev/serial \
     -v /dev/bus/usb:/dev/bus/usb \
-    --device-cgroup-rule='c 166:* rmw' \
-    --device-cgroup-rule='c 188:* rmw' \
+    --device "${TTY_DEV}:${TTY_DEV}" \
     "$IMAGE" \
     ros2 launch mixer_comm mixer_demo_single.launch.py \
         node_id:=${NODE_ID} serial:=${SERIAL} "$@"
