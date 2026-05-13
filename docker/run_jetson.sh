@@ -8,10 +8,9 @@
 # Usage:
 #   ./docker/run_jetson.sh <node_id> <usb_serial> [extra ros2 launch args...]
 #
-# Example (Jetson A, dongle flashed as node 1):
-#   ./docker/run_jetson.sh 1 297729DAE31AEE29
-# (Jetson B, dongle flashed as node 2):
-#   ./docker/run_jetson.sh 2 5B36F76056801B1F
+# Example (find your dongle's serial with `ls /dev/serial/by-id/`):
+#   ./docker/run_jetson.sh 1 <SERIAL_NODE1>
+#   ./docker/run_jetson.sh 2 <SERIAL_NODE2>
 #
 # Notes:
 # - Run from the repo root: ./docker/run_jetson.sh ...

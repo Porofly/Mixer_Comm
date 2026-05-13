@@ -64,11 +64,11 @@ Jetson L4T — see main README's Docker section.
 ### Run — unbounded (Ctrl-C to stop)
 
 ```bash
-# Jetson A, dongle flashed as node 1
-MIXER_HOST_NET=1 ./docker/run_jetson.sh 1 297729DAE31AEE29
+# Jetson A, dongle flashed as node 1 (find serial with `ls /dev/serial/by-id/`)
+MIXER_HOST_NET=1 ./docker/run_jetson.sh 1 <SERIAL_NODE1>
 
 # Jetson B, dongle flashed as node 2
-MIXER_HOST_NET=1 ./docker/run_jetson.sh 2 5B36F76056801B1F
+MIXER_HOST_NET=1 ./docker/run_jetson.sh 2 <SERIAL_NODE2>
 ```
 
 ### Run — bounded with JSON report
@@ -76,7 +76,7 @@ MIXER_HOST_NET=1 ./docker/run_jetson.sh 2 5B36F76056801B1F
 ```bash
 # Both Jetsons (same MIXER_COUNT / MIXER_TIMEOUT_S):
 MIXER_HOST_NET=1 MIXER_COUNT=100 MIXER_TIMEOUT_S=200 \
-    ./docker/run_jetson.sh 2 5B36F76056801B1F
+    ./docker/run_jetson.sh 2 <SERIAL_NODE2>
 ```
 
 `MIXER_COUNT=N` means: pub originates N frames then switches to echo-only
@@ -127,10 +127,10 @@ Same Jetson layout, `MIXER_MODE=hello`:
 
 ```bash
 # Jetson A
-MIXER_HOST_NET=1 MIXER_MODE=hello ./docker/run_jetson.sh 1 297729DAE31AEE29
+MIXER_HOST_NET=1 MIXER_MODE=hello ./docker/run_jetson.sh 1 <SERIAL_NODE1>
 
 # Jetson B
-MIXER_HOST_NET=1 MIXER_MODE=hello ./docker/run_jetson.sh 2 5B36F76056801B1F
+MIXER_HOST_NET=1 MIXER_MODE=hello ./docker/run_jetson.sh 2 <SERIAL_NODE2>
 ```
 
 Each side prints both its own outgoing and the peer's incoming traffic:

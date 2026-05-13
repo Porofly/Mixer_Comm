@@ -190,8 +190,8 @@ USB CDC, 115200 8N1, 길이 prefix 이진 프레이밍. 정의는
 
    ```yaml
    dongles:
-     - { node_id: 1, serial: "297729DAE31AEE29" }
-     - { node_id: 2, serial: "5B36F76056801B1F" }
+     - { node_id: 1, serial: "<동글 1 시리얼>" }
+     - { node_id: 2, serial: "<동글 2 시리얼>" }
      - { node_id: 3, serial: "<신규 시리얼>" }
      - { node_id: 4, serial: "<신규 시리얼>" }
    ```
