@@ -20,6 +20,10 @@
 #   traffic is carried by the Mixer RF link, decoded locally by the dongle.
 # - Mounts /dev/serial and /dev/bus/usb so the by-id symlink the launch file
 #   expects resolves inside the container.
+# - Set MIXER_HOST_NET=1 to use --network=host. Needed on Jetson L4T kernels
+#   that lack the iptable_raw module (modprobe iptable_raw -> FATAL), which
+#   makes Docker's bridge driver fail. Safe with ROS_LOCALHOST_ONLY=1: DDS
+#   stays on lo even on the host network namespace.
 
 set -euo pipefail
 
@@ -44,8 +48,14 @@ if [[ ! -e "$BY_ID" ]]; then
     exit 1
 fi
 
+NET_ARGS=()
+if [[ "${MIXER_HOST_NET:-0}" == "1" ]]; then
+    NET_ARGS+=(--network=host)
+fi
+
 exec docker run --rm -it \
     --name "$NAME" \
+    "${NET_ARGS[@]}" \
     -v /dev/serial:/dev/serial \
     -v /dev/bus/usb:/dev/bus/usb \
     --device-cgroup-rule='c 166:* rmw' \
