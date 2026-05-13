@@ -20,6 +20,7 @@
 // This node depends on knowing its own node_id (so it can recognize echoes).
 // Pass via parameter.
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -96,6 +97,11 @@ public:
     expected_rx_count_ = declare_parameter<int>("expected_rx_count", 0);
     drain_grace_s_ = declare_parameter<double>("drain_grace_s", 3.0);
     report_path_ = declare_parameter<std::string>("report_path", "");
+    // Hard deadline. 0 = disabled. When > 0, the run is forcibly finalized
+    // after this many seconds even if expected_rx_count was never reached
+    // (e.g. RF losses kept us short of N). Without it, packet loss makes
+    // the bounded run hang forever.
+    timeout_s_ = declare_parameter<double>("timeout_s", 0.0);
 
     if (node_id_ < 1 || node_id_ > 255) {
       throw std::runtime_error("node_id must be in [1, 255]");
@@ -106,6 +112,9 @@ public:
     if (drain_grace_s_ < 0.0) {
       throw std::runtime_error("drain_grace_s must be >= 0");
     }
+    if (timeout_s_ < 0.0) {
+      throw std::runtime_error("timeout_s must be >= 0 (0 = disabled)");
+    }
 
     sub_ = create_subscription<mixer_comm_msgs::msg::MixerPayload>(
       "mixer/rx", rclcpp::QoS(50),
@@ -115,11 +124,24 @@ public:
       std::chrono::duration<double>(report_period));
     report_timer_ = create_wall_timer(period, [this]() { report(); });
 
+    if (timeout_s_ > 0.0) {
+      const auto to = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(timeout_s_));
+      timeout_timer_ = create_wall_timer(to, [this]() {
+        if (drain_armed_) return;  // already on the planned exit path
+        timeout_timer_->cancel();
+        RCLCPP_WARN(get_logger(),
+          "demo_sub: timeout_s=%.1f reached without hitting expected_rx_count, "
+          "finalizing now", timeout_s_);
+        finalize_and_shutdown();
+      });
+    }
+
     start_steady_ = std::chrono::steady_clock::now();
     RCLCPP_INFO(get_logger(),
       "demo_sub up: node_id=%d listening on mixer/rx, period=%.1fs "
-      "expected_rx=%d drain=%.1fs report=%s",
-      node_id_, report_period, expected_rx_count_, drain_grace_s_,
+      "expected_rx=%d drain=%.1fs timeout=%.1fs report=%s",
+      node_id_, report_period, expected_rx_count_, drain_grace_s_, timeout_s_,
       report_path_.empty() ? "(disabled)" : report_path_.c_str());
   }
 
@@ -257,8 +279,14 @@ private:
     return o.str();
   }
 
-  void finalize_and_shutdown()
+  // Idempotent: safe to call from both the drain timer (planned exit) and
+  // an on_shutdown handler (Ctrl-C). The flag prevents the final report from
+  // being printed/written twice.
+public:
+  void finalize(bool trigger_shutdown)
   {
+    if (finalized_.exchange(true)) return;
+
     const auto duration = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - start_steady_).count();
 
@@ -295,19 +323,27 @@ private:
       }
     }
 
-    rclcpp::shutdown();
+    if (trigger_shutdown) {
+      rclcpp::shutdown();
+    }
   }
+
+private:
+  void finalize_and_shutdown() { finalize(/*trigger_shutdown=*/true); }
 
   int node_id_;
   int expected_rx_count_ = 0;
   double drain_grace_s_ = 3.0;
+  double timeout_s_ = 0.0;
   std::string report_path_;
   bool drain_armed_ = false;
+  std::atomic<bool> finalized_{false};
   std::chrono::steady_clock::time_point start_steady_;
 
   rclcpp::Subscription<mixer_comm_msgs::msg::MixerPayload>::SharedPtr sub_;
   rclcpp::TimerBase::SharedPtr report_timer_;
   rclcpp::TimerBase::SharedPtr drain_timer_;
+  rclcpp::TimerBase::SharedPtr timeout_timer_;
   std::map<std::uint8_t, PeerStats> peers_;
 };
 
@@ -317,7 +353,12 @@ int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
   try {
-    rclcpp::spin(std::make_shared<mixer_comm::DemoSub>());
+    auto node = std::make_shared<mixer_comm::DemoSub>();
+    // Make sure Ctrl-C still produces a final summary + JSON before exit.
+    // on_shutdown fires once during rclcpp::shutdown(); finalize() is
+    // idempotent so the planned (drain_timer) path also works.
+    rclcpp::on_shutdown([node]() { node->finalize(/*trigger_shutdown=*/false); });
+    rclcpp::spin(node);
   } catch (const std::exception & e) {
     fprintf(stderr, "mixer_demo_sub: %s\n", e.what());
     rclcpp::shutdown();

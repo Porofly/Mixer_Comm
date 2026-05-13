@@ -114,10 +114,27 @@ private:
 
   void tick()
   {
+    const bool originate = (tx_count_ == 0)
+      || (sent_ < static_cast<std::uint64_t>(tx_count_));
+
     DemoFrame frame{};
     frame.sender_id = static_cast<std::uint8_t>(node_id_);
-    frame.seq = seq_++;
-    frame.origin_ts_us = now_us();
+    if (originate) {
+      // Fresh frame: bump seq + take a new origin timestamp.
+      frame.seq = seq_++;
+      frame.origin_ts_us = now_us();
+      last_seq_ = frame.seq;
+      last_origin_ts_us_ = frame.origin_ts_us;
+    } else {
+      // Keep-alive: do NOT bump seq or take a new origin timestamp. The
+      // subscriber will see this as a duplicate of last_seq (which it
+      // counts but ignores for loss accounting). The point is to keep a
+      // slot in every Mixer round so the echo field below still reaches
+      // the peer -- otherwise the peer can never close out its own RTT
+      // measurements after we stop originating.
+      frame.seq = last_seq_;
+      frame.origin_ts_us = last_origin_ts_us_;
+    }
 
     std::optional<PendingEcho> echo;
     {
@@ -140,12 +157,13 @@ private:
     std::memcpy(msg.data.data(), &frame, sizeof(DemoFrame));
     pub_->publish(msg);
 
-    sent_++;
-    if (tx_count_ > 0 && sent_ >= static_cast<std::uint64_t>(tx_count_)) {
-      RCLCPP_INFO(get_logger(),
-        "demo_pub: sent %lu / %d frames, stopping originator timer (echoes continue)",
-        sent_, tx_count_);
-      timer_->cancel();
+    if (originate) {
+      sent_++;
+      if (tx_count_ > 0 && sent_ >= static_cast<std::uint64_t>(tx_count_)) {
+        RCLCPP_INFO(get_logger(),
+          "demo_pub: sent %lu / %d frames, switching to echo-only keep-alive",
+          sent_, tx_count_);
+      }
     }
   }
 
@@ -161,6 +179,8 @@ private:
   int tx_count_ = 0;
   std::uint64_t sent_ = 0;
   std::uint16_t seq_ = 0;
+  std::uint16_t last_seq_ = 0;
+  std::uint32_t last_origin_ts_us_ = 0;
   std::mutex echo_mu_;
   std::optional<PendingEcho> pending_echo_;
   rclcpp::Publisher<mixer_comm_msgs::msg::MixerPayload>::SharedPtr pub_;

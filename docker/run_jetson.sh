@@ -24,10 +24,15 @@
 #   that lack the iptable_raw module (modprobe iptable_raw -> FATAL), which
 #   makes Docker's bridge driver fail. Safe with ROS_LOCALHOST_ONLY=1: DDS
 #   stays on lo even on the host network namespace.
-# - Set MIXER_COUNT=N for a bounded run: pub stops originating after N frames,
-#   sub waits for N received frames per peer + drain grace, then writes a JSON
-#   summary to ./reports/node<id>.json on the host (mounted into the container
-#   at /tmp/mixer_reports). With MIXER_COUNT unset (default), runs forever.
+# - Set MIXER_COUNT=N for a bounded run: pub stops originating after N frames
+#   (it then keeps emitting echo-only keep-alives so the peer's RTT closes
+#   out), sub waits for N received frames per peer + drain grace, then
+#   writes a JSON summary to ./reports/node<id>.json on the host (mounted
+#   into the container at /tmp/mixer_reports). With MIXER_COUNT unset
+#   (default), runs forever.
+# - Set MIXER_TIMEOUT_S=120 to bound the run by wall time as well: if RF
+#   losses keep received < N, the sub finalizes anyway after this many
+#   seconds. Strongly recommended for any MIXER_COUNT run.
 
 set -euo pipefail
 
@@ -79,6 +84,9 @@ if [[ -n "${MIXER_COUNT:-}" && "${MIXER_COUNT}" != "0" ]]; then
         count:=${MIXER_COUNT}
         report_path:=/tmp/mixer_reports/node${NODE_ID}.json
     )
+fi
+if [[ -n "${MIXER_TIMEOUT_S:-}" && "${MIXER_TIMEOUT_S}" != "0" ]]; then
+    LAUNCH_ARGS+=(timeout_s:=${MIXER_TIMEOUT_S})
 fi
 
 exec docker run --rm -it \

@@ -22,6 +22,9 @@ Optional:
                       echoes once any peer reaches N received frames, then
                       prints a final cumulative report and shuts down.
     drain_grace_s     3.0
+    timeout_s         0.0 (disabled). Hard deadline in seconds. When > 0,
+                      the sub finalizes even if expected_rx_count was never
+                      reached -- protects against hangs from RF packet loss.
     report_path       "" (disabled). Set to a path to write a JSON summary
                       at shutdown, e.g. /tmp/mixer_reports/node1.json.
 
@@ -57,6 +60,7 @@ def _spawn(context, *_args, **_kwargs):
     baud = int(LaunchConfiguration("baud").perform(context))
     count = int(LaunchConfiguration("count").perform(context))
     drain_grace_s = float(LaunchConfiguration("drain_grace_s").perform(context))
+    timeout_s = float(LaunchConfiguration("timeout_s").perform(context))
     report_path = LaunchConfiguration("report_path").perform(context).strip()
 
     if node_id < 1 or node_id > 255:
@@ -109,6 +113,7 @@ def _spawn(context, *_args, **_kwargs):
                 {"report_period_s": report_period_s},
                 {"expected_rx_count": count},
                 {"drain_grace_s": drain_grace_s},
+                {"timeout_s": timeout_s},
                 {"report_path": report_path},
             ],
         ),
@@ -126,6 +131,7 @@ def generate_launch_description():
             DeclareLaunchArgument("baud", default_value="115200"),
             DeclareLaunchArgument("count", default_value="0"),
             DeclareLaunchArgument("drain_grace_s", default_value="3.0"),
+            DeclareLaunchArgument("timeout_s", default_value="0.0"),
             DeclareLaunchArgument("report_path", default_value=""),
             OpaqueFunction(function=_spawn),
         ]
