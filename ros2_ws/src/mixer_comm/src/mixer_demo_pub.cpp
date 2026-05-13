@@ -13,6 +13,16 @@
 //
 // Subscriber-side accounting (loss, dup, RTT histogram) lives in
 // mixer_demo_sub.cpp; this file only generates and echoes traffic.
+//
+// Auto-rate sync: when rate_hz <= 0, the pub holds off transmitting and
+// observes the local mixer/stats topic instead. Each MixerStats message marks
+// the end of one Mixer round, so the steady-state round period can be measured
+// directly. After auto_sync_samples rounds, the timer is started at
+// (round_rate_hz * auto_sync_safety_factor) -- a small safety margin keeps the
+// host below the dongle's per-round TX queue ceiling. If stats never arrives
+// (USB stalled, firmware not booted), the auto_sync_timeout_s fallback kicks
+// in with rate=auto_sync_fallback_hz and a WARN. Pass rate_hz>0 to skip
+// auto-sync entirely.
 
 #include <chrono>
 #include <cstdint>
@@ -20,8 +30,10 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 
 #include "mixer_comm_msgs/msg/mixer_payload.hpp"
+#include "mixer_comm_msgs/msg/mixer_stats.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 using namespace std::chrono_literals;
@@ -50,12 +62,15 @@ public:
   {
     node_id_ = declare_parameter<int>("node_id", 0);
     slot_ = declare_parameter<int>("slot", 0);
-    const double rate_hz = declare_parameter<double>("rate_hz", 1.0);
-    // tx_count = 0 means "send forever" (default, original behavior).
-    // tx_count > 0 means "stop the timer after N originating frames"; the
-    // node stays alive afterwards so it can still echo the peer's last few
-    // frames back. The subscriber decides when to actually shut down.
+    // rate_hz semantics:
+    //   > 0  -> use this rate verbatim (original behavior)
+    //   <= 0 -> auto-sync from /mixer/stats round period
+    const double rate_hz = declare_parameter<double>("rate_hz", 0.0);
     tx_count_ = declare_parameter<int>("tx_count", 0);
+    auto_sync_samples_ = declare_parameter<int>("auto_sync_samples", 4);
+    auto_sync_safety_factor_ = declare_parameter<double>("auto_sync_safety_factor", 0.95);
+    auto_sync_timeout_s_ = declare_parameter<double>("auto_sync_timeout_s", 10.0);
+    auto_sync_fallback_hz_ = declare_parameter<double>("auto_sync_fallback_hz", 1.0);
 
     if (node_id_ < 1 || node_id_ > 255) {
       throw std::runtime_error("node_id must be in [1, 255]");
@@ -63,33 +78,103 @@ public:
     if (slot_ < 0 || slot_ > 255) {
       throw std::runtime_error("slot must be in [0, 255]");
     }
-    if (rate_hz <= 0.0) {
-      throw std::runtime_error("rate_hz must be positive");
-    }
     if (tx_count_ < 0) {
       throw std::runtime_error("tx_count must be >= 0 (0 = unlimited)");
+    }
+    if (auto_sync_samples_ < 2) {
+      throw std::runtime_error("auto_sync_samples must be >= 2");
+    }
+    if (auto_sync_safety_factor_ <= 0.0 || auto_sync_safety_factor_ > 1.0) {
+      throw std::runtime_error("auto_sync_safety_factor must be in (0, 1]");
+    }
+    if (auto_sync_fallback_hz_ <= 0.0) {
+      throw std::runtime_error("auto_sync_fallback_hz must be positive");
     }
 
     pub_ = create_publisher<mixer_comm_msgs::msg::MixerPayload>("mixer/tx", 10);
 
-    // Listen to our own dongle's rx so we can echo any frame from a peer.
-    // Mixer decodes every slot at every node, so this single subscription
-    // sees all peers' frames.
     rx_sub_ = create_subscription<mixer_comm_msgs::msg::MixerPayload>(
       "mixer/rx", rclcpp::QoS(50),
       [this](mixer_comm_msgs::msg::MixerPayload::SharedPtr msg) { on_rx(*msg); });
 
-    const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::duration<double>(1.0 / rate_hz));
-    timer_ = create_wall_timer(period, [this]() { tick(); });
+    if (rate_hz > 0.0) {
+      start_timer_at(rate_hz, "manual");
+    } else {
+      RCLCPP_INFO(get_logger(),
+        "demo_pub up: node_id=%d slot=%d rate=AUTO (waiting for stats, "
+        "samples=%d safety=%.2f timeout=%.1fs fallback=%.2fHz) tx_count=%d (%s)",
+        node_id_, slot_, auto_sync_samples_, auto_sync_safety_factor_,
+        auto_sync_timeout_s_, auto_sync_fallback_hz_, tx_count_,
+        tx_count_ == 0 ? "unlimited" : "bounded");
 
-    RCLCPP_INFO(get_logger(),
-                "demo_pub up: node_id=%d slot=%d rate=%.2f Hz tx_count=%d (%s)",
-                node_id_, slot_, rate_hz, tx_count_,
-                tx_count_ == 0 ? "unlimited" : "bounded");
+      stats_sub_ = create_subscription<mixer_comm_msgs::msg::MixerStats>(
+        "mixer/stats", rclcpp::QoS(50),
+        [this](mixer_comm_msgs::msg::MixerStats::SharedPtr msg) { on_stats(*msg); });
+
+      const auto to = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(auto_sync_timeout_s_));
+      auto_sync_timeout_ = create_wall_timer(to, [this]() {
+        auto_sync_timeout_->cancel();
+        if (timer_) return;
+        RCLCPP_WARN(get_logger(),
+          "demo_pub: auto-sync timed out after %.1fs (no usable stats), "
+          "falling back to %.2f Hz", auto_sync_timeout_s_, auto_sync_fallback_hz_);
+        start_timer_at(auto_sync_fallback_hz_, "fallback");
+      });
+    }
   }
 
 private:
+  void start_timer_at(double rate_hz, const char * source)
+  {
+    if (timer_) return;
+    if (rate_hz <= 0.0) {
+      RCLCPP_ERROR(get_logger(), "refusing to start timer with non-positive rate %.4f", rate_hz);
+      return;
+    }
+    const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>(1.0 / rate_hz));
+    timer_ = create_wall_timer(period, [this]() { tick(); });
+    RCLCPP_INFO(get_logger(),
+      "demo_pub: rate=%.3f Hz (%s), tx_count=%d (%s)",
+      rate_hz, source, tx_count_, tx_count_ == 0 ? "unlimited" : "bounded");
+    if (auto_sync_timeout_) auto_sync_timeout_->cancel();
+  }
+
+  // Stats observer: collect (steady_clock now, round counter) pairs from each
+  // MixerStats message. Once we have N samples covering at least one full
+  // measurement window, derive the round rate and start the tx timer at a
+  // safety-discounted multiple of it.
+  void on_stats(const mixer_comm_msgs::msg::MixerStats & msg)
+  {
+    if (timer_) return;
+    const auto now = std::chrono::steady_clock::now();
+    stats_samples_.push_back({now, msg.round});
+    if (static_cast<int>(stats_samples_.size()) < auto_sync_samples_) return;
+
+    // Derive rate from first/last sample using round delta in case stats
+    // messages were dropped mid-window (the 'round' field is monotonic).
+    const auto & first = stats_samples_.front();
+    const auto & last = stats_samples_.back();
+    const auto dt = std::chrono::duration<double>(last.t - first.t).count();
+    const std::int64_t dround = static_cast<std::int64_t>(last.round) - static_cast<std::int64_t>(first.round);
+    if (dt <= 0.0 || dround <= 0) {
+      // Bad data; drop oldest and keep collecting.
+      stats_samples_.erase(stats_samples_.begin());
+      return;
+    }
+    const double round_rate_hz = static_cast<double>(dround) / dt;
+    const double safe_rate_hz = round_rate_hz * auto_sync_safety_factor_;
+    RCLCPP_INFO(get_logger(),
+      "demo_pub: auto-sync measured round rate = %.3f Hz over %d samples (%.2fs); "
+      "starting tx at %.3f Hz (= %.0f%% of round)",
+      round_rate_hz, auto_sync_samples_, dt, safe_rate_hz,
+      auto_sync_safety_factor_ * 100.0);
+    start_timer_at(safe_rate_hz, "auto-sync");
+    stats_sub_.reset();
+    stats_samples_.clear();
+  }
+
   static std::uint32_t now_us()
   {
     const auto epoch = std::chrono::steady_clock::now().time_since_epoch();
@@ -174,18 +259,31 @@ private:
     std::uint32_t origin_ts_us;
   };
 
+  struct StatsSample
+  {
+    std::chrono::steady_clock::time_point t;
+    std::uint32_t round;
+  };
+
   int node_id_;
   int slot_;
   int tx_count_ = 0;
+  int auto_sync_samples_ = 4;
+  double auto_sync_safety_factor_ = 0.95;
+  double auto_sync_timeout_s_ = 10.0;
+  double auto_sync_fallback_hz_ = 1.0;
   std::uint64_t sent_ = 0;
   std::uint16_t seq_ = 0;
   std::uint16_t last_seq_ = 0;
   std::uint32_t last_origin_ts_us_ = 0;
   std::mutex echo_mu_;
   std::optional<PendingEcho> pending_echo_;
+  std::vector<StatsSample> stats_samples_;
   rclcpp::Publisher<mixer_comm_msgs::msg::MixerPayload>::SharedPtr pub_;
   rclcpp::Subscription<mixer_comm_msgs::msg::MixerPayload>::SharedPtr rx_sub_;
+  rclcpp::Subscription<mixer_comm_msgs::msg::MixerStats>::SharedPtr stats_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::TimerBase::SharedPtr auto_sync_timeout_;
 };
 
 }  // namespace mixer_comm

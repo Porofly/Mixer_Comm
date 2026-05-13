@@ -13,7 +13,12 @@ Required args:
 
 Optional:
     slot              defaults to node_id - 1 (cyclic)
-    pub_rate_hz       1.0
+    pub_rate_hz       0.0 (auto-sync from /mixer/stats round period). Set to
+                      a positive value to skip auto-sync and use that rate
+                      verbatim. Auto-sync waits a few rounds, measures the
+                      firmware's actual round rate, and sets the timer to
+                      ~95% of it -- safe across firmware --round-length
+                      changes without needing the user to know the value.
     report_period_s   2.0
     baud              115200
     count             0 = unlimited (default). N>0 makes this a bounded test:
@@ -126,7 +131,7 @@ def generate_launch_description():
             DeclareLaunchArgument("node_id"),
             DeclareLaunchArgument("serial"),
             DeclareLaunchArgument("slot", default_value=""),
-            DeclareLaunchArgument("pub_rate_hz", default_value="1.0"),
+            DeclareLaunchArgument("pub_rate_hz", default_value="0.0"),
             DeclareLaunchArgument("report_period_s", default_value="2.0"),
             DeclareLaunchArgument("baud", default_value="115200"),
             DeclareLaunchArgument("count", default_value="0"),

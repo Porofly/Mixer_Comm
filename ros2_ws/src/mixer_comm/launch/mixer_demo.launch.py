@@ -79,7 +79,7 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("config", default_value=str(default_config)),
-            DeclareLaunchArgument("pub_rate_hz", default_value="1.0"),
+            DeclareLaunchArgument("pub_rate_hz", default_value="0.0"),
             DeclareLaunchArgument("report_period_s", default_value="2.0"),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(bridge_launch)),
