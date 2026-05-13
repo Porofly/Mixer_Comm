@@ -33,6 +33,11 @@
 # - Set MIXER_TIMEOUT_S=120 to bound the run by wall time as well: if RF
 #   losses keep received < N, the sub finalizes anyway after this many
 #   seconds. Strongly recommended for any MIXER_COUNT run.
+# - Set MIXER_MODE=hello to run the human-readable Hello-world demo instead
+#   (mixer_hello_pub/sub: each node sends "Hello, Mixer <id>-<counter>" and
+#   prints whatever ASCII it receives). MIXER_COUNT/MIXER_TIMEOUT_S have no
+#   effect in this mode -- it runs until Ctrl-C. Default MIXER_MODE=demo
+#   keeps the original statistical demo (RTT/lost/JSON).
 
 set -euo pipefail
 
@@ -78,15 +83,28 @@ fi
 REPORTS_DIR_HOST=${MIXER_REPORTS_DIR:-$(pwd)/reports}
 mkdir -p "$REPORTS_DIR_HOST"
 
+MODE=${MIXER_MODE:-demo}
+case "$MODE" in
+    demo)  LAUNCH_FILE="mixer_demo_single.launch.py" ;;
+    hello) LAUNCH_FILE="mixer_hello.launch.py" ;;
+    *)
+        echo "ERROR: MIXER_MODE='$MODE' must be 'demo' or 'hello'." >&2
+        exit 2 ;;
+esac
+
 LAUNCH_ARGS=(node_id:=${NODE_ID} serial:=${SERIAL})
-if [[ -n "${MIXER_COUNT:-}" && "${MIXER_COUNT}" != "0" ]]; then
-    LAUNCH_ARGS+=(
-        count:=${MIXER_COUNT}
-        report_path:=/tmp/mixer_reports/node${NODE_ID}.json
-    )
-fi
-if [[ -n "${MIXER_TIMEOUT_S:-}" && "${MIXER_TIMEOUT_S}" != "0" ]]; then
-    LAUNCH_ARGS+=(timeout_s:=${MIXER_TIMEOUT_S})
+# MIXER_COUNT / MIXER_TIMEOUT_S only apply to the statistical demo; the hello
+# launch file does not declare those arguments and would reject them.
+if [[ "$MODE" == "demo" ]]; then
+    if [[ -n "${MIXER_COUNT:-}" && "${MIXER_COUNT}" != "0" ]]; then
+        LAUNCH_ARGS+=(
+            count:=${MIXER_COUNT}
+            report_path:=/tmp/mixer_reports/node${NODE_ID}.json
+        )
+    fi
+    if [[ -n "${MIXER_TIMEOUT_S:-}" && "${MIXER_TIMEOUT_S}" != "0" ]]; then
+        LAUNCH_ARGS+=(timeout_s:=${MIXER_TIMEOUT_S})
+    fi
 fi
 
 exec docker run --rm -it \
@@ -97,5 +115,5 @@ exec docker run --rm -it \
     -v "${REPORTS_DIR_HOST}:/tmp/mixer_reports" \
     --device "${TTY_DEV}:${TTY_DEV}" \
     "$IMAGE" \
-    ros2 launch mixer_comm mixer_demo_single.launch.py \
+    ros2 launch mixer_comm "$LAUNCH_FILE" \
         "${LAUNCH_ARGS[@]}" "$@"
