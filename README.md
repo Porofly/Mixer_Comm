@@ -283,11 +283,13 @@ The two-dongle baseline generalises by editing two files:
 
    ```yaml
    dongles:
-     - { node_id: 1, serial: "297729DAE31AEE29" }
-     - { node_id: 2, serial: "5B36F76056801B1F" }
-     - { node_id: 3, serial: "<new serial>" }
-     - { node_id: 4, serial: "<new serial>" }
+     - { node_id: 1, serial: "<dongle 1 serial>" }
+     - { node_id: 2, serial: "<dongle 2 serial>" }
+     - { node_id: 3, serial: "<dongle 3 serial>" }
+     - { node_id: 4, serial: "<dongle 4 serial>" }
    ```
+
+   Find each dongle's serial with `ls /dev/serial/by-id/` after plugging it in.
 
    No code or rebuild needed.
 

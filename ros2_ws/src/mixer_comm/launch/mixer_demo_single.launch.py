@@ -19,7 +19,7 @@ Optional:
 
 Usage:
     ros2 launch mixer_comm mixer_demo_single.launch.py \\
-        node_id:=1 serial:=297729DAE31AEE29
+        node_id:=1 serial:=DONGLE_USB_SERIAL_HERE
 """
 
 from pathlib import Path

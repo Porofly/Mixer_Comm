@@ -1,12 +1,13 @@
 # Per-Jetson compose file. Each Jetson runs this file with its own values
 # for MIXER_NODE_ID and MIXER_SERIAL (set via .env or shell environment).
 #
-# Bring up:
-#   MIXER_NODE_ID=1 MIXER_SERIAL=297729DAE31AEE29 docker compose -f docker/docker-compose.yml up
+# Bring up (find the dongle's serial with `ls /dev/serial/by-id/`):
+#   MIXER_NODE_ID=1 MIXER_SERIAL=<your-dongle-serial> \
+#       docker compose -f docker/docker-compose.yml up
 #
 # Or put them in docker/.env:
 #   MIXER_NODE_ID=1
-#   MIXER_SERIAL=297729DAE31AEE29
+#   MIXER_SERIAL=<your-dongle-serial>
 #
 # DDS is intentionally local-only (set in the image). Override
 # ROS_LOCALHOST_ONLY=0 below if you want the two Jetsons to share a domain.
