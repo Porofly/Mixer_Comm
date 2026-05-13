@@ -63,6 +63,41 @@ Each invocation re-injects `BUILD_NODE_ID` and rebuilds with SES (`emBuild`).
 Pass `SES_DIR=...` if your SES install is not at the default
 `/usr/share/segger_embedded_studio_for_arm_5.70a/`.
 
+#### Tuning the round period (optional)
+
+`build_node.sh` can patch `mixer_config.h` in place for one build via two
+optional flags (the original is restored on exit, so the working tree stays
+clean):
+
+```bash
+# Halve the round length -> roughly double the host publish rate ceiling
+scripts/build_node.sh 1 --round-length 25
+scripts/build_node.sh 2 --round-length 25
+
+# Or shorten slot time too (must stay above PHY packet air time)
+scripts/build_node.sh 1 --round-length 25 --slot-us 1500
+scripts/build_node.sh 2 --round-length 25 --slot-us 1500
+```
+
+Both nodes must be flashed with identical values or they will not synchronise.
+
+The actual round period is `round_length × slot_us` plus PHY/processing
+overhead, not the bare product. Measured on this build:
+
+| `round_length` | `slot_us` | Measured round period | Host rate ceiling |
+|----------------|-----------|-----------------------|-------------------|
+| 50  (default)  | 2000      | ~1.10 s               | ~0.91 Hz |
+
+Verify your build's actual round rate empirically with the bridge running:
+
+```bash
+ros2 topic hz /mixer/node<id>/mixer/stats
+```
+
+Set `pub_rate_hz` (in `mixer_demo_single.launch.py` args) at or below the
+measured round rate -- publishing faster than the round just back-pressures
+the dongle TX queue and looks like packet loss in the demo's `lost` counter.
+
 ### Host (ROS 2 workspace)
 
 ```bash
