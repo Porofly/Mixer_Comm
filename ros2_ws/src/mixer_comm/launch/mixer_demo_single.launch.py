@@ -16,10 +16,23 @@ Optional:
     pub_rate_hz       1.0
     report_period_s   2.0
     baud              115200
+    count             0 = unlimited (default). N>0 makes this a bounded test:
+                      the pub stops originating after N frames (it keeps
+                      echoing), and the sub waits drain_grace_s for late
+                      echoes once any peer reaches N received frames, then
+                      prints a final cumulative report and shuts down.
+    drain_grace_s     3.0
+    report_path       "" (disabled). Set to a path to write a JSON summary
+                      at shutdown, e.g. /tmp/mixer_reports/node1.json.
 
 Usage:
     ros2 launch mixer_comm mixer_demo_single.launch.py \\
         node_id:=1 serial:=297729DAE31AEE29
+
+    # bounded run, write JSON report
+    ros2 launch mixer_comm mixer_demo_single.launch.py \\
+        node_id:=1 serial:=... count:=100 \\
+        report_path:=/tmp/mixer_reports/node1.json
 """
 
 from pathlib import Path
@@ -42,6 +55,9 @@ def _spawn(context, *_args, **_kwargs):
     pub_rate_hz = float(LaunchConfiguration("pub_rate_hz").perform(context))
     report_period_s = float(LaunchConfiguration("report_period_s").perform(context))
     baud = int(LaunchConfiguration("baud").perform(context))
+    count = int(LaunchConfiguration("count").perform(context))
+    drain_grace_s = float(LaunchConfiguration("drain_grace_s").perform(context))
+    report_path = LaunchConfiguration("report_path").perform(context).strip()
 
     if node_id < 1 or node_id > 255:
         raise ValueError(f"node_id must be in [1,255], got {node_id}")
@@ -79,6 +95,7 @@ def _spawn(context, *_args, **_kwargs):
                 {"node_id": node_id},
                 {"slot": slot},
                 {"rate_hz": pub_rate_hz},
+                {"tx_count": count},
             ],
         ),
         Node(
@@ -90,6 +107,9 @@ def _spawn(context, *_args, **_kwargs):
             parameters=[
                 {"node_id": node_id},
                 {"report_period_s": report_period_s},
+                {"expected_rx_count": count},
+                {"drain_grace_s": drain_grace_s},
+                {"report_path": report_path},
             ],
         ),
     ]
@@ -104,6 +124,9 @@ def generate_launch_description():
             DeclareLaunchArgument("pub_rate_hz", default_value="1.0"),
             DeclareLaunchArgument("report_period_s", default_value="2.0"),
             DeclareLaunchArgument("baud", default_value="115200"),
+            DeclareLaunchArgument("count", default_value="0"),
+            DeclareLaunchArgument("drain_grace_s", default_value="3.0"),
+            DeclareLaunchArgument("report_path", default_value=""),
             OpaqueFunction(function=_spawn),
         ]
     )

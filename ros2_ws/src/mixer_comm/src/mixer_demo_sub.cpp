@@ -11,15 +11,24 @@
 // minimum RTT establishes the dongle's loopback floor; cross-host RTT is the
 // real RF round-trip (plus 2 dongle hops).
 //
+// Bounded mode: when expected_rx_count > 0, the node arms a one-shot drain
+// timer the moment any peer reaches that many received frames. After
+// drain_grace_s seconds (during which late echoes are still folded in), it
+// prints a final cumulative report, optionally writes report_path as JSON,
+// and shuts the executor down -- producing a deterministic test run.
+//
 // This node depends on knowing its own node_id (so it can recognize echoes).
 // Pass via parameter.
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -43,6 +52,26 @@ struct __attribute__((packed)) DemoFrame
 };
 static_assert(sizeof(DemoFrame) == 16, "DemoFrame must be 16 bytes");
 
+// Two RTT accumulators per peer: a windowed one that resets every periodic
+// report, and a cumulative one that survives until shutdown for the final
+// summary.
+struct RttAccum
+{
+  std::uint64_t sum_us = 0;
+  std::uint64_t max_us = 0;
+  std::uint64_t min_us = std::numeric_limits<std::uint64_t>::max();
+  std::uint64_t count = 0;
+
+  void add(std::uint64_t v)
+  {
+    sum_us += v;
+    count++;
+    if (v > max_us) max_us = v;
+    if (v < min_us) min_us = v;
+  }
+  void reset() { *this = RttAccum{}; }
+};
+
 struct PeerStats
 {
   std::uint64_t received = 0;
@@ -52,12 +81,8 @@ struct PeerStats
   bool          have_last_seq = false;
   std::uint16_t last_seq = 0;
 
-  // RTT samples (us) accumulated this report window, only populated when this
-  // peer is echoing our own frames back.
-  std::uint64_t rtt_sum_us = 0;
-  std::uint64_t rtt_max_us = 0;
-  std::uint64_t rtt_min_us = std::numeric_limits<std::uint64_t>::max();
-  std::uint64_t rtt_count = 0;
+  RttAccum rtt_window;  // resets every periodic report
+  RttAccum rtt_total;   // accumulates over the whole run
 };
 
 class DemoSub : public rclcpp::Node
@@ -68,8 +93,18 @@ public:
   {
     node_id_ = declare_parameter<int>("node_id", 0);
     const double report_period = declare_parameter<double>("report_period_s", 2.0);
+    expected_rx_count_ = declare_parameter<int>("expected_rx_count", 0);
+    drain_grace_s_ = declare_parameter<double>("drain_grace_s", 3.0);
+    report_path_ = declare_parameter<std::string>("report_path", "");
+
     if (node_id_ < 1 || node_id_ > 255) {
       throw std::runtime_error("node_id must be in [1, 255]");
+    }
+    if (expected_rx_count_ < 0) {
+      throw std::runtime_error("expected_rx_count must be >= 0 (0 = unlimited)");
+    }
+    if (drain_grace_s_ < 0.0) {
+      throw std::runtime_error("drain_grace_s must be >= 0");
     }
 
     sub_ = create_subscription<mixer_comm_msgs::msg::MixerPayload>(
@@ -78,11 +113,14 @@ public:
 
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(report_period));
-    timer_ = create_wall_timer(period, [this]() { report(); });
+    report_timer_ = create_wall_timer(period, [this]() { report(); });
 
+    start_steady_ = std::chrono::steady_clock::now();
     RCLCPP_INFO(get_logger(),
-      "demo_sub up: node_id=%d listening on mixer/rx, reporting every %.1fs",
-      node_id_, report_period);
+      "demo_sub up: node_id=%d listening on mixer/rx, period=%.1fs "
+      "expected_rx=%d drain=%.1fs report=%s",
+      node_id_, report_period, expected_rx_count_, drain_grace_s_,
+      report_path_.empty() ? "(disabled)" : report_path_.c_str());
   }
 
 private:
@@ -98,14 +136,8 @@ private:
     if (msg.data.size() != sizeof(DemoFrame)) return;
     DemoFrame f{};
     std::memcpy(&f, msg.data.data(), sizeof(f));
-    if (f.sender_id == 0) return;  // idle / zero-padded slot
-    if (f.sender_id == node_id_) {
-      // Our own frame coming back via Mixer's self-decode. We don't need to
-      // count this for loss/RTT, but we do still inspect echo fields below
-      // (some firmware variants might let us hear our own echo from a peer
-      // -- defensively guard against that by not double-counting).
-      return;
-    }
+    if (f.sender_id == 0) return;
+    if (f.sender_id == node_id_) return;
 
     auto & s = peers_[f.sender_id];
     s.received++;
@@ -128,15 +160,41 @@ private:
     s.have_last_seq = true;
     s.last_seq = f.seq;
 
-    // RTT: peer is echoing one of OUR frames back to us.
     if (f.echo_sender_id == static_cast<std::uint8_t>(node_id_)) {
       const std::uint32_t rtt32 = now_us() - f.echo_origin_ts_us;
       const std::uint64_t rtt_us = static_cast<std::uint64_t>(rtt32);
-      s.rtt_sum_us += rtt_us;
-      s.rtt_count++;
-      if (rtt_us > s.rtt_max_us) s.rtt_max_us = rtt_us;
-      if (rtt_us < s.rtt_min_us) s.rtt_min_us = rtt_us;
+      s.rtt_window.add(rtt_us);
+      s.rtt_total.add(rtt_us);
     }
+
+    maybe_arm_drain();
+  }
+
+  // Once any peer has reached the expected rx count, start the drain grace
+  // timer. Late echoes are still folded into rtt_total during this window.
+  void maybe_arm_drain()
+  {
+    if (drain_armed_ || expected_rx_count_ <= 0) return;
+    bool reached = false;
+    for (const auto & [_, s] : peers_) {
+      if (s.received >= static_cast<std::uint64_t>(expected_rx_count_)) {
+        reached = true;
+        break;
+      }
+    }
+    if (!reached) return;
+
+    drain_armed_ = true;
+    RCLCPP_INFO(get_logger(),
+      "demo_sub: hit expected_rx_count=%d, draining for %.1fs before final report",
+      expected_rx_count_, drain_grace_s_);
+
+    const auto grace = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>(drain_grace_s_));
+    drain_timer_ = create_wall_timer(grace, [this]() {
+      drain_timer_->cancel();
+      finalize_and_shutdown();
+    });
   }
 
   void report()
@@ -146,29 +204,110 @@ private:
       return;
     }
     for (auto & [peer, s] : peers_) {
+      const auto & w = s.rtt_window;
       double rtt_mean = 0.0;
       std::uint64_t rtt_min = 0;
-      std::uint64_t rtt_max = s.rtt_max_us;
-      if (s.rtt_count > 0) {
-        rtt_mean = static_cast<double>(s.rtt_sum_us) / s.rtt_count;
-        rtt_min = s.rtt_min_us;
+      std::uint64_t rtt_max = w.max_us;
+      if (w.count > 0) {
+        rtt_mean = static_cast<double>(w.sum_us) / w.count;
+        rtt_min = w.min_us;
       }
       RCLCPP_INFO(get_logger(),
         "peer=%u rx=%lu lost=%lu dup=%lu reord=%lu "
         "rtt[n=%lu min/mean/max us]=%lu/%.0f/%lu",
         static_cast<unsigned>(peer),
         s.received, s.lost, s.duplicate, s.reordered,
-        s.rtt_count, rtt_min, rtt_mean, rtt_max);
-      s.rtt_sum_us = 0;
-      s.rtt_count = 0;
-      s.rtt_max_us = 0;
-      s.rtt_min_us = std::numeric_limits<std::uint64_t>::max();
+        w.count, rtt_min, rtt_mean, rtt_max);
+      s.rtt_window.reset();
     }
   }
 
+  // Hand-rolled JSON: we have a tiny, fixed schema and don't want to drag in
+  // nlohmann/json or rapidjson just for this.
+  std::string build_json(double duration_s) const
+  {
+    std::ostringstream o;
+    o << "{\n";
+    o << "  \"node_id\": " << node_id_ << ",\n";
+    o << "  \"duration_s\": " << duration_s << ",\n";
+    o << "  \"expected_rx_count\": " << expected_rx_count_ << ",\n";
+    o << "  \"peers\": {\n";
+    bool first = true;
+    for (const auto & [peer, s] : peers_) {
+      const auto & t = s.rtt_total;
+      const std::uint64_t rtt_min = t.count > 0 ? t.min_us : 0;
+      const double rtt_mean = t.count > 0
+        ? static_cast<double>(t.sum_us) / t.count : 0.0;
+      const std::uint64_t rtt_max = t.max_us;
+      if (!first) o << ",\n";
+      first = false;
+      o << "    \"" << static_cast<unsigned>(peer) << "\": {";
+      o << " \"received\": " << s.received;
+      o << ", \"lost\": " << s.lost;
+      o << ", \"duplicate\": " << s.duplicate;
+      o << ", \"reordered\": " << s.reordered;
+      o << ", \"rtt_count\": " << t.count;
+      o << ", \"rtt_min_us\": " << rtt_min;
+      o << ", \"rtt_mean_us\": " << rtt_mean;
+      o << ", \"rtt_max_us\": " << rtt_max;
+      o << " }";
+    }
+    o << "\n  }\n";
+    o << "}\n";
+    return o.str();
+  }
+
+  void finalize_and_shutdown()
+  {
+    const auto duration = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - start_steady_).count();
+
+    RCLCPP_INFO(get_logger(), "===== FINAL REPORT (cumulative, duration=%.2fs) =====",
+                duration);
+    if (peers_.empty()) {
+      RCLCPP_WARN(get_logger(), "no peer frames received during the run");
+    }
+    for (const auto & [peer, s] : peers_) {
+      const auto & t = s.rtt_total;
+      double rtt_mean = 0.0;
+      std::uint64_t rtt_min = 0;
+      std::uint64_t rtt_max = t.max_us;
+      if (t.count > 0) {
+        rtt_mean = static_cast<double>(t.sum_us) / t.count;
+        rtt_min = t.min_us;
+      }
+      RCLCPP_INFO(get_logger(),
+        "peer=%u TOTAL rx=%lu lost=%lu dup=%lu reord=%lu "
+        "rtt[n=%lu min/mean/max us]=%lu/%.0f/%lu",
+        static_cast<unsigned>(peer),
+        s.received, s.lost, s.duplicate, s.reordered,
+        t.count, rtt_min, rtt_mean, rtt_max);
+    }
+
+    if (!report_path_.empty()) {
+      std::ofstream f(report_path_);
+      if (!f) {
+        RCLCPP_ERROR(get_logger(),
+          "failed to open report_path '%s' for writing", report_path_.c_str());
+      } else {
+        f << build_json(duration);
+        RCLCPP_INFO(get_logger(), "wrote JSON report to %s", report_path_.c_str());
+      }
+    }
+
+    rclcpp::shutdown();
+  }
+
   int node_id_;
+  int expected_rx_count_ = 0;
+  double drain_grace_s_ = 3.0;
+  std::string report_path_;
+  bool drain_armed_ = false;
+  std::chrono::steady_clock::time_point start_steady_;
+
   rclcpp::Subscription<mixer_comm_msgs::msg::MixerPayload>::SharedPtr sub_;
-  rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::TimerBase::SharedPtr report_timer_;
+  rclcpp::TimerBase::SharedPtr drain_timer_;
   std::map<std::uint8_t, PeerStats> peers_;
 };
 

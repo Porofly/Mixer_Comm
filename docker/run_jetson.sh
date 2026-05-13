@@ -24,6 +24,10 @@
 #   that lack the iptable_raw module (modprobe iptable_raw -> FATAL), which
 #   makes Docker's bridge driver fail. Safe with ROS_LOCALHOST_ONLY=1: DDS
 #   stays on lo even on the host network namespace.
+# - Set MIXER_COUNT=N for a bounded run: pub stops originating after N frames,
+#   sub waits for N received frames per peer + drain grace, then writes a JSON
+#   summary to ./reports/node<id>.json on the host (mounted into the container
+#   at /tmp/mixer_reports). With MIXER_COUNT unset (default), runs forever.
 
 set -euo pipefail
 
@@ -63,12 +67,27 @@ if [[ "${MIXER_HOST_NET:-0}" == "1" ]]; then
     NET_ARGS+=(--network=host)
 fi
 
+# Reports directory: created on the host (./reports by default) and mounted
+# at /tmp/mixer_reports inside the container so JSON summaries land where the
+# user can see them after the container exits.
+REPORTS_DIR_HOST=${MIXER_REPORTS_DIR:-$(pwd)/reports}
+mkdir -p "$REPORTS_DIR_HOST"
+
+LAUNCH_ARGS=(node_id:=${NODE_ID} serial:=${SERIAL})
+if [[ -n "${MIXER_COUNT:-}" && "${MIXER_COUNT}" != "0" ]]; then
+    LAUNCH_ARGS+=(
+        count:=${MIXER_COUNT}
+        report_path:=/tmp/mixer_reports/node${NODE_ID}.json
+    )
+fi
+
 exec docker run --rm -it \
     --name "$NAME" \
     "${NET_ARGS[@]}" \
     -v /dev/serial:/dev/serial \
     -v /dev/bus/usb:/dev/bus/usb \
+    -v "${REPORTS_DIR_HOST}:/tmp/mixer_reports" \
     --device "${TTY_DEV}:${TTY_DEV}" \
     "$IMAGE" \
     ros2 launch mixer_comm mixer_demo_single.launch.py \
-        node_id:=${NODE_ID} serial:=${SERIAL} "$@"
+        "${LAUNCH_ARGS[@]}" "$@"

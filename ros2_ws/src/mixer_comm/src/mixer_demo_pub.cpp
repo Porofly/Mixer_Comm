@@ -51,6 +51,11 @@ public:
     node_id_ = declare_parameter<int>("node_id", 0);
     slot_ = declare_parameter<int>("slot", 0);
     const double rate_hz = declare_parameter<double>("rate_hz", 1.0);
+    // tx_count = 0 means "send forever" (default, original behavior).
+    // tx_count > 0 means "stop the timer after N originating frames"; the
+    // node stays alive afterwards so it can still echo the peer's last few
+    // frames back. The subscriber decides when to actually shut down.
+    tx_count_ = declare_parameter<int>("tx_count", 0);
 
     if (node_id_ < 1 || node_id_ > 255) {
       throw std::runtime_error("node_id must be in [1, 255]");
@@ -60,6 +65,9 @@ public:
     }
     if (rate_hz <= 0.0) {
       throw std::runtime_error("rate_hz must be positive");
+    }
+    if (tx_count_ < 0) {
+      throw std::runtime_error("tx_count must be >= 0 (0 = unlimited)");
     }
 
     pub_ = create_publisher<mixer_comm_msgs::msg::MixerPayload>("mixer/tx", 10);
@@ -76,7 +84,9 @@ public:
     timer_ = create_wall_timer(period, [this]() { tick(); });
 
     RCLCPP_INFO(get_logger(),
-                "demo_pub up: node_id=%d slot=%d rate=%.2f Hz", node_id_, slot_, rate_hz);
+                "demo_pub up: node_id=%d slot=%d rate=%.2f Hz tx_count=%d (%s)",
+                node_id_, slot_, rate_hz, tx_count_,
+                tx_count_ == 0 ? "unlimited" : "bounded");
   }
 
 private:
@@ -129,6 +139,14 @@ private:
     msg.data.resize(sizeof(DemoFrame));
     std::memcpy(msg.data.data(), &frame, sizeof(DemoFrame));
     pub_->publish(msg);
+
+    sent_++;
+    if (tx_count_ > 0 && sent_ >= static_cast<std::uint64_t>(tx_count_)) {
+      RCLCPP_INFO(get_logger(),
+        "demo_pub: sent %lu / %d frames, stopping originator timer (echoes continue)",
+        sent_, tx_count_);
+      timer_->cancel();
+    }
   }
 
   struct PendingEcho
@@ -140,6 +158,8 @@ private:
 
   int node_id_;
   int slot_;
+  int tx_count_ = 0;
+  std::uint64_t sent_ = 0;
   std::uint16_t seq_ = 0;
   std::mutex echo_mu_;
   std::optional<PendingEcho> pending_echo_;
